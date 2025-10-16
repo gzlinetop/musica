@@ -1523,130 +1523,152 @@ function showMini(show=true){ if(show) $('#miniPlayer').classList.remove('hidden
 
 
 (function(){
-  // bandera para asegurarnos de bindear solo una vez
-  if(window.__backbuttonHandlerInstalled) return;
-  window.__backbuttonHandlerInstalled = true;
+  if(window.__robustBackHandlerInstalled) return;
+  window.__robustBackHandlerInstalled = true;
 
-  // intenta minimizar usando distintos plugins / APIs expuestas por wrappers
-  function tryMinimize(){
+  // ---- utilidades ----
+  function safeLog(...args){ try{ console.log.apply(console,args); }catch(e){} }
+  function showDebugToast(msg){ try{ showToast && showToast(msg, 2000); }catch(e){ safeLog('toast?', msg); } }
+  function listExposedObjects(){
     try{
-      // 1) cordova-plugin-appminimize (común)
+      const keys = Object.keys(window).filter(k=> /cordova|Android|Capacitor|app|minimize|App|plugins/i.test(k));
+      const sample = { userAgent: navigator.userAgent, windowKeys: keys.slice(0,50) };
+      safeLog('[BACK-HANDLER] Env sample:', sample);
+      return sample;
+    }catch(e){ safeLog('[BACK-HANDLER] listExposedObjects err', e); return {}; }
+  }
+
+  // ---- intento de minimizar usando varias firmas de plugin ----------
+  function tryMinimizeNative(){
+    try{
+      // cordova-plugin-appminimize
       if(window.cordova && window.cordova.plugins && window.cordova.plugins.appMinimize &&
          typeof window.cordova.plugins.appMinimize.minimize === 'function'){
         window.cordova.plugins.appMinimize.minimize();
         return true;
       }
-
-      // 2) cordova-plugin-background-mode (algunos wrappers exponen moveToBackground)
+      // cordova-plugin-background-mode (moveToBackground)
       if(window.cordova && window.cordova.plugins && window.cordova.plugins.backgroundMode &&
          typeof window.cordova.plugins.backgroundMode.moveToBackground === 'function'){
         window.cordova.plugins.backgroundMode.moveToBackground();
         return true;
       }
-
-      // 3) Android bridge expuesto por wrapper (heurística)
-      if(window.Android && typeof window.Android.minimizeApp === 'function'){
-        try{ window.Android.minimizeApp(); }catch(e){}
-        return true;
-      }
-
-      // 4) Capacitor (si tu wrapper expone un plugin con minimize)
+      // Capacitor (plugin App.minimize)
       if(window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.App &&
          typeof window.Capacitor.Plugins.App.minimize === 'function'){
         window.Capacitor.Plugins.App.minimize();
         return true;
       }
-
-      // nada disponible
+      // Android bridge personalizado
+      if(window.Android && typeof window.Android.minimizeApp === 'function'){
+        try{ window.Android.minimizeApp(); }catch(e){}
+        return true;
+      }
+      // Another common pattern
+      if(window.App && typeof window.App.minimize === 'function'){
+        try{ window.App.minimize(); }catch(e){}
+        return true;
+      }
       return false;
-    }catch(e){
-      console.warn('tryMinimize error', e);
+    }catch(err){
+      safeLog('[BACK-HANDLER] tryMinimizeNative error', err);
       return false;
     }
   }
 
-  // handler cuando se presiona "atrás"
-  function onBackPressed(e){
-    try{
-      if(e && typeof e.preventDefault === 'function') e.preventDefault();
-    }catch(e){}
+  // ---- handler central ----
+  function onBackPressed(ev){
+    try{ if(ev && typeof ev.preventDefault === 'function') ev.preventDefault(); }catch(e){}
 
-    // Intentar minimizar via plugin/nativo
-    const didMinimize = tryMinimize();
+    safeLog('[BACK-HANDLER] back pressed; trying minimize/native fallback');
+    const didMinimize = tryMinimizeNative();
     if(didMinimize){
-      // opcional: informar al usuario
-      try{ showToast('La app se ha minimizado.'); }catch(e){}
+      showDebugToast('App minimizada');
+      safeLog('[BACK-HANDLER] minimized via native plugin');
       return;
     }
 
-    // Fallback: si hay historial, intentar ir atrás (pero prevenimos salida total)
+    // show environment debug on first failure to help support
+    const env = listExposedObjects();
+    showDebugToast('Intentando minimizar (sin plugin).');
+
+    // Fallback JS: bloquear salida usando history - push a state and reponer al pop
     try{
-      if(window.history && window.history.length > 1){
-        // retroceder un paso en la historia
-        window.history.back();
-        // y volver a empujar el estado para evitar que la siguiente pulsación salga de la app
-        setTimeout(()=>{ try{ history.pushState(null, null, location.href); }catch(e){} }, 200);
+      // si hay historial, retrocedemos 1 y luego volvemos a empujar para neutralizar la salida
+      if(window.history && history.length > 1){
+        history.back();
+        setTimeout(()=>{ try{ history.pushState(null, null, location.href); }catch(e){} }, 150);
+        showDebugToast('Botón Atrás manejado – historial retrocedido.');
         return;
       }
-    }catch(e){}
+    }catch(e){ safeLog('[BACK-HANDLER] history fallback err', e); }
 
-    // Si no hay historial o no se pudo minimizar -> bloquear salida y avisar
+    // Último recurso: empujar estado y avisar al usuario
     try{
-      // empujamos un estado para neutralizar el back y evitar salir
-      history.pushState(null, null, location.href);
-      try{ showToast('La app queda en segundo plano. Usa el botón Home.'); }catch(e){}
-      try{ document.activeElement && document.activeElement.blur(); }catch(e){}
+      try{ history.pushState(null, null, location.href); }catch(e){}
+      showDebugToast('La aplicación permanecerá abierta. Usa Home para salir.');
     }catch(e){
-      // último recurso: no hacemos nada para evitar crash
-      console.warn('fallback back pressed handler error', e);
+      safeLog('[BACK-HANDLER] final fallback err', e);
     }
   }
 
-  // 1) Si estamos en un entorno Cordova-like, usar deviceready + backbutton
-  function installCordovaBackHandler(){
+  // ---- instalar handler Cordova 'backbutton' si existe ----
+  function installCordovaBack(){
     try{
       if(window.cordova){
         document.addEventListener('deviceready', function(){
-          // remover si existía
           try{ document.removeEventListener('backbutton', onBackPressed, false); }catch(e){}
           document.addEventListener('backbutton', onBackPressed, false);
+          safeLog('[BACK-HANDLER] cordova backbutton installed');
         }, false);
         return true;
       }
-    }catch(e){}
+    }catch(err){ safeLog('[BACK-HANDLER] installCordovaBack err', err); }
     return false;
   }
 
-  // 2) Fallback general: interceptar popstate (botón atrás del WebView)
-  function installPopstateHandler(){
+  // ---- instalar popstate handler (evita cerrar por navigation) ----
+  function installPopstate(){
     try{
-      // Push a initial state so back triggers popstate instead of closing app
+      // push initial state to catch the first back
       try{ history.pushState(null, null, location.href); }catch(e){}
-
-      // evitar múltiples binds
-      if(window.__popstateHandlerInstalled) return;
-      window.__popstateHandlerInstalled = true;
-
-      window.addEventListener('popstate', function(ev){
-        onBackPressed(ev);
-      }, false);
+      if(window.__popstateBackInstalled) return true;
+      window.__popstateBackInstalled = true;
+      window.addEventListener('popstate', function(ev){ onBackPressed(ev); }, false);
+      safeLog('[BACK-HANDLER] popstate handler installed');
       return true;
-    }catch(e){
-      return false;
-    }
+    }catch(err){ safeLog('[BACK-HANDLER] installPopstate err', err); return false; }
   }
 
-  // instalar handlers
-  const cordovaOk = installCordovaBackHandler();
-  const popOk = installPopstateHandler();
-
-  // si ninguno instalado, solo registramos un listener de 'keydown' por si el wrapper enviara un evento
-  if(!cordovaOk && !popOk){
-    window.addEventListener('keydown', function(ev){
-      // tecla 27 = ESC (algunos wrappers usan Escape para back)
-      if(ev.key === 'Escape' || ev.keyCode === 27) onBackPressed(ev);
-    }, false);
+  // ---- keydown fallback (Escape or Android backcodes) ----
+  function installKeydown(){
+    try{
+      window.addEventListener('keydown', function(ev){
+        // keyCode 4 (historical Android back) sometimes appears in keydown in some webviews
+        if(ev.key === 'Escape' || ev.keyCode === 27 || ev.keyCode === 4){
+          onBackPressed(ev);
+        }
+      }, false);
+      safeLog('[BACK-HANDLER] keydown handler installed');
+      return true;
+    }catch(err){ safeLog('[BACK-HANDLER] installKeydown err', err); return false; }
   }
+
+  // Ejecutar instaladores
+  const cordovaOk = installCordovaBack();
+  const popOk = installPopstate();
+  const kdOk = installKeydown();
+
+  // si nada instalado, al menos hacemos pushState y mostramos aviso
+  if(!cordovaOk && !popOk && !kdOk){
+    try{ history.pushState(null, null, location.href); }catch(e){}
+    showDebugToast('Back-handler activo (modo básico).');
+  }
+
+  // Exponer utilidad de diagnóstico para que la muestres y la pegues en soporte
+  window.__backHandlerDiagnostics = function(){
+    return { userAgent: navigator.userAgent, cordova: !!window.cordova, Android: !!window.Android, Capacitor: !!window.Capacitor, keys: Object.keys(window).slice(0,200) };
+  };
 
 })();
 
