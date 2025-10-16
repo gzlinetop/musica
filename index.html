@@ -296,6 +296,75 @@ ease;
 .suggestion-sub{ color:var(--muted); font-size:12px; margin-top:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 
 
+
+/* ----- Toggle button styles (shuffle / repeat) ----- */
+/* base: fuerza colores y transiciones profesionales */
+.control.toggle {
+  transition: transform .18s ease, box-shadow .18s ease, background .18s ease, color .18s ease;
+  position: relative;
+  overflow: visible;
+}
+
+/* estilo activo general (verde elegante) */
+.control.toggle.active,
+.control.toggle.repeat-all,
+.control.toggle.repeat-one {
+  background: linear-gradient(180deg,#14b37a,#0ea36a); /* verde */
+  box-shadow: 0 8px 22px rgba(16,120,85,0.18), 0 2px 6px rgba(0,0,0,0.12) inset;
+  color: #fff;
+  transform: translateY(-2px);
+}
+
+/* iconos dentro del botón blanco para mejor contraste */
+.control.toggle.active svg path,
+.control.toggle.repeat-all svg path,
+.control.toggle.repeat-one svg path {
+  fill: #fff !important;
+  stroke: #fff !important;
+}
+
+/* estado inactivo sutil */
+.control.toggle.inactive {
+  opacity: 0.65;
+  filter: none;
+}
+
+/* indicador "one": pequeño badge con 1 sobre el botón */
+.control.toggle.repeat-one::after{
+  content: "1";
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: #fff;
+  color: #0a7a4f;
+  font-weight:700;
+  font-size:11px;
+  width:18px;
+  height:18px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  border-radius:50%;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+}
+
+/* indicador "all": pequeño brillo adicional (opcional) */
+.control.toggle.repeat-all::before{
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 14px;
+  background: radial-gradient(closest-side, rgba(20,179,122,0.08), transparent);
+  z-index: -1;
+}
+
+/* shuffle active style (un tag específico si quieres otro color) */
+.control.toggle.shuffle-active{
+  background: linear-gradient(180deg,#08a3ff,#007fd6); /* azul si quieres diferenciar */
+  box-shadow: 0 10px 24px rgba(2,80,160,0.12);
+}
+
+
 </style>
 </head>
 <body>
@@ -1176,8 +1245,60 @@ $('#prevBtn').addEventListener('click', playPrev);
 $('#nextBtn').addEventListener('click', playNext);
 $('#miniPrev').addEventListener('click', playPrev);
 $('#miniNext').addEventListener('click', playNext);
-$('#shuffleBtn').addEventListener('click', ()=>{ shuffle = !shuffle; $('#shuffleBtn').style.opacity = shuffle ? 1 : 0.6; showToast('Aleatorio: '+(shuffle?'ON':'OFF')); });
-$('#repeatBtn').addEventListener('click', ()=>{ repeatMode = repeatMode==='none'?'all':repeatMode==='all'?'one':'none'; $('#repeatBtn').style.opacity = repeatMode==='none'?0.6:1; showToast('Repetir: '+repeatMode); });
+
+/* ===== UI updates for repeat/shuffle (replace old handlers that used inline opacity) ===== */
+
+function updateShuffleButtonUI(){
+  const btn = $('#shuffleBtn');
+  if(!btn) return;
+  // quitar clases previas
+  btn.classList.remove('toggle','active','inactive','shuffle-active');
+  btn.classList.add('toggle');
+  if(shuffle){
+    // si quieres verde para shuffle, usar 'active' en vez de 'shuffle-active'
+    btn.classList.add('shuffle-active'); // o 'active' para verde
+    btn.classList.remove('inactive');
+    btn.setAttribute('aria-pressed', 'true');
+  } else {
+    btn.classList.remove('shuffle-active');
+    btn.classList.add('inactive');
+    btn.setAttribute('aria-pressed', 'false');
+  }
+  btn.title = 'Aleatorio: ' + (shuffle ? 'ON' : 'OFF');
+}
+
+function updateRepeatButtonUI(){
+  const btn = $('#repeatBtn');
+  if(!btn) return;
+  btn.classList.remove('toggle','repeat-none','repeat-all','repeat-one','inactive');
+  btn.classList.add('toggle');
+
+  if(repeatMode === 'none'){
+    btn.classList.add('repeat-none');
+    btn.classList.add('inactive');
+    btn.setAttribute('aria-pressed', 'false');
+  } else if(repeatMode === 'all'){
+    btn.classList.add('repeat-all'); // usará el estilo activo (verde)
+    btn.setAttribute('aria-pressed', 'true');
+  } else if(repeatMode === 'one'){
+    btn.classList.add('repeat-one'); // estilo activo + badge '1'
+    btn.setAttribute('aria-pressed', 'true');
+  }
+  btn.title = 'Repetir: ' + repeatMode;
+}
+
+/* Reemplazamos los handlers por llamadas a las funciones que actualizan UI */
+$('#shuffleBtn').addEventListener('click', ()=>{ 
+  shuffle = !shuffle; 
+  updateShuffleButtonUI(); 
+  showToast('Aleatorio: '+(shuffle?'ON':'OFF')); 
+});
+
+$('#repeatBtn').addEventListener('click', ()=>{
+  repeatMode = repeatMode === 'none' ? 'all' : (repeatMode === 'all' ? 'one' : 'none');
+  updateRepeatButtonUI();
+  showToast('Repetir: '+repeatMode);
+});
 
 /* minimize */
 function minimize(){ $('#leftCard').classList.add('hidden'); $('#miniPlayer').classList.remove('hidden'); showToast('Minimizado — reproducción continúa'); }
@@ -1277,6 +1398,9 @@ $$('.tab').forEach(t=>{
 /* initial renders */
 function renderAll(){ renderRecents(); renderPlaylistsUI(); }
 renderAll();
+// Añade esto justo después para sincronizar botones con el estado actual:
+updateShuffleButtonUI();
+updateRepeatButtonUI();
 
 /* small click outside to remove blur state */
 document.addEventListener('click', (e)=>{ if(!e.target.closest('.search-box')) $('#rightPanel').classList.remove('search-active'); });
