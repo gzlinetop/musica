@@ -518,6 +518,33 @@ ease;
 <div id="ytApiHolder" style="display:none"></div>
 
 <script>
+
+
+
+/* ----- Detectar si estamos dentro de un wrapper/app (heurístico) ----- */
+function isWrappedApp(){
+  try{
+    const ua = (navigator.userAgent || '').toLowerCase();
+    // heurísticas: AppCreator, appcreator24, cordova, capacitor, electron, android webview, ios webview
+    if(ua.includes('appcreator') || ua.includes('appcreator24') || ua.includes('cordova') || ua.includes('capacitor') || ua.includes('electron')) return true;
+    // algunos wrappers exponen objetos globales:
+    if(typeof window.cordova !== 'undefined' || typeof window.Capacitor !== 'undefined' || typeof window.Android !== 'undefined') return true;
+    // fallback: si estamos en Android/iOS pero no en navegador de escritorio, también lo consideramos posible
+    if(ua.includes('android') || ua.includes('iphone') || ua.includes('ipad')) {
+      // si el navegador sugiere Chrome mobile u Safari, lo dejamos false; solo true si encontramos "webview-like"
+      const isMobileBrowser = ua.includes('safari') || ua.includes('chrome') || ua.includes('firefox');
+      // heurística débil: preferir false para navegadores móviles normales
+      return false;
+    }
+    return false;
+  }catch(e){ return false; }
+}
+
+
+
+
+
+
 /* =====================
    Config + Storage
    ===================== */
@@ -655,6 +682,9 @@ let shuffle = false;
 let progressTimer = null;
 let videoShown = true;
 let transferInProgress = false; // evita transferencias concurrentes entre visible <-> hidden
+let audioFallbackEl = null; // elemento HTMLAudio para fallback (si se usa)
+let usingAudioFallback = false;
+
 
 
 (function loadYT(){ const t = document.createElement('script'); t.src = "https://www.youtube.com/iframe_api"; document.body.appendChild(t); })();
@@ -694,6 +724,22 @@ function loadAndPlayById(videoId, autoplay=true, setQueue=true, indexOverride=nu
   if(!videoId) return;
   if(setQueue && indexOverride!==null) currentIndex = indexOverride;
   currentTrack = queue[currentIndex] || {videoId, title:'', channel:'', thumb:''};
+
+
+  // Si currentTrack tiene audioUrl directo y estamos en wrapper móvil, usar fallback HTMLAudio
+  if(currentTrack && currentTrack.audioUrl){
+    // Paramos cualquier YT player por seguridad
+    try{ visiblePlayer && visiblePlayer.stopVideo && visiblePlayer.stopVideo(); }catch(e){}
+    try{ hiddenPlayer && hiddenPlayer.stopVideo && hiddenPlayer.stopVideo(); }catch(e){}
+    // reproducir vía HTMLAudio (más probable que siga en background)
+    playAudioFallback(currentTrack.audioUrl, autoplay);
+    addRecent(currentTrack);
+    saveStorage();
+    return;
+  }
+
+
+
   updateNowCard(currentTrack);
   if(!playersReady){
     pendingPlay = {videoId, autoplay};
@@ -716,6 +762,43 @@ function loadAndPlayById(videoId, autoplay=true, setQueue=true, indexOverride=nu
   addRecent(currentTrack);
   saveStorage();
 }
+
+
+
+function createAudioFallback(){
+  if(audioFallbackEl) return audioFallbackEl;
+  audioFallbackEl = document.createElement('audio');
+  audioFallbackEl.crossOrigin = "anonymous";
+  audioFallbackEl.preload = "auto";
+  audioFallbackEl.controls = false;
+  audioFallbackEl.style.display = 'none';
+  document.body.appendChild(audioFallbackEl);
+  audioFallbackEl.addEventListener('ended', ()=>{ /* si quieres pasar al siguiente */ playNext(); });
+  audioFallbackEl.addEventListener('play', ()=>{ isPlaying = true; setPlayIcon(true); showMini(true); spinVinyl(true); });
+  audioFallbackEl.addEventListener('pause', ()=>{ isPlaying = false; setPlayIcon(false); spinVinyl(false); });
+  return audioFallbackEl;
+}
+
+function playAudioFallback(url, autoplay=true){
+  try{
+    const a = createAudioFallback();
+    a.src = url;
+    usingAudioFallback = true;
+    if(autoplay) a.play().catch(e=>{ console.warn('audioFallback play failed', e); });
+    updateNowCard({ title: currentTrack?.title || 'Audio', channel: currentTrack?.channel || '', thumb: currentTrack?.thumb });
+  }catch(e){ console.warn('playAudioFallback error', e); usingAudioFallback = false; }
+}
+
+function stopAudioFallback(){
+  try{
+    if(audioFallbackEl){
+      audioFallbackEl.pause();
+      audioFallbackEl.src = '';
+    }
+  }catch(e){}
+  usingAudioFallback = false;
+}
+
 
 function playCurrent(){ if(currentIndex<0 || currentIndex>=queue.length) return; loadAndPlayById(queue[currentIndex].videoId, true, true, currentIndex); }
 function playNext(){
@@ -1462,39 +1545,42 @@ function waitForPlayerState(player, expectedState, timeoutMs = 2500, pollInterva
     }, pollInterval);
   });
 }
+/* =========================
+   Visibility handling - Optimizado para wrappers móviles (AppCreator24)
+   Evita parar players cuando estamos en una app empaquetada.
+   ========================= */
 
 document.addEventListener('visibilitychange', async ()=>{
-  if(!playersReady) return; // si reproductores aun no listos, nothing to do
+  // si reproductores no listos, no hacemos nada
+  if(!playersReady) return;
 
-  // Evitar reentradas
+  // si detectamos que estamos dentro de una app empaquetada, NO realizamos transferencias
+  if(isWrappedApp()){
+    // Nota: muchas WebViews móviles suspenden JS cuando la app va a background.
+    // Aquí no hacemos stop ni transfer. Con suerte la WebView permitirá que
+    // el audio siga (especialmente si usas HTMLAudio). Si la WebView lo suspende,
+    // el único camino es habilitar background-audio en la configuración nativa.
+    console.log('Wrapped app detected -> skipping visibility transfer to avoid pauses');
+    return;
+  }
+
+  // Si no estamos en wrapper, mantenemos la lógica robusta previa (transferencia segura)
   if(transferInProgress) return;
   transferInProgress = true;
 
   try{
-    // cuando la página se oculta -> intentar asegurar que el player "oculto" reproduzca antes de detener el visible
     if(document.hidden){
       try{
-        // solo transferir si visiblePlayer está reproduciendo actualmente
         if(visiblePlayer && typeof visiblePlayer.getPlayerState === 'function' &&
            visiblePlayer.getPlayerState() === YT.PlayerState.PLAYING && currentTrack && currentTrack.videoId){
           const cur = (visiblePlayer && visiblePlayer.getCurrentTime) ? visiblePlayer.getCurrentTime() : 0;
-          // carga en hidden
           hiddenPlayer.loadVideoById({videoId: currentTrack.videoId, startSeconds: cur});
-          // intenta reproducir inmediatamente
           try{ hiddenPlayer.playVideo && hiddenPlayer.playVideo(); }catch(e){}
-          // espera a que hidden realmente entre en PLAYING
           const ok = await waitForPlayerState(hiddenPlayer, YT.PlayerState.PLAYING, 3000);
-          if(ok){
-            // detener visible solo si hidden ya está reproduciendo
-            try{ visiblePlayer.stopVideo && visiblePlayer.stopVideo(); }catch(e){}
-          } else {
-            // si no pudo arrancar hidden, dejamos visible reproduciendo para evitar pause audible
-            try{ /* no hacemos stop en visible */ }catch(e){}
-          }
+          if(ok){ try{ visiblePlayer.stopVideo && visiblePlayer.stopVideo(); }catch(e){} }
         }
       }catch(err){ console.warn('visibility -> hidden transfer error', err); }
     } else {
-      // cuando la página vuelve visible -> transferir de hidden a visible sin cortar audio
       try{
         if(hiddenPlayer && typeof hiddenPlayer.getPlayerState === 'function' &&
            hiddenPlayer.getPlayerState() === YT.PlayerState.PLAYING && currentTrack && currentTrack.videoId){
@@ -1502,16 +1588,11 @@ document.addEventListener('visibilitychange', async ()=>{
           visiblePlayer.loadVideoById({videoId: currentTrack.videoId, startSeconds: cur});
           try{ visiblePlayer.playVideo && visiblePlayer.playVideo(); }catch(e){}
           const ok = await waitForPlayerState(visiblePlayer, YT.PlayerState.PLAYING, 3000);
-          if(ok){
-            try{ hiddenPlayer.stopVideo && hiddenPlayer.stopVideo(); }catch(e){}
-          } else {
-            // si visible no arrancó, mantenemos hidden para no cortar
-          }
+          if(ok){ try{ hiddenPlayer.stopVideo && hiddenPlayer.stopVideo(); }catch(e){} }
         }
       }catch(err){ console.warn('visibility -> visible transfer error', err); }
     }
   }finally{
-    // permitir futuros transfers
     transferInProgress = false;
   }
 });
