@@ -654,6 +654,8 @@ let repeatMode = 'none';
 let shuffle = false;
 let progressTimer = null;
 let videoShown = true;
+let transferInProgress = false; // evita transferencias concurrentes entre visible <-> hidden
+
 
 (function loadYT(){ const t = document.createElement('script'); t.src = "https://www.youtube.com/iframe_api"; document.body.appendChild(t); })();
 
@@ -1443,31 +1445,77 @@ window._mp = {STORAGE, saveStorage, queue};
 /* =====================
    Visibility handling: transfer to hidden player when page hidden
    ===================== */
+/* =========================
+   Visibility handling - robust transfer (no pause on background/foreground)
+   ========================= */
+
+function waitForPlayerState(player, expectedState, timeoutMs = 2500, pollInterval = 150){
+  return new Promise((resolve)=>{
+    if(!player || typeof player.getPlayerState !== 'function'){ return resolve(false); }
+    const start = Date.now();
+    const iv = setInterval(()=>{
+      try{
+        const st = player.getPlayerState();
+        if(st === expectedState){ clearInterval(iv); return resolve(true); }
+      }catch(e){}
+      if(Date.now() - start > timeoutMs){ clearInterval(iv); return resolve(false); }
+    }, pollInterval);
+  });
+}
+
 document.addEventListener('visibilitychange', async ()=>{
+  if(!playersReady) return; // si reproductores aun no listos, nothing to do
+
+  // Evitar reentradas
+  if(transferInProgress) return;
+  transferInProgress = true;
+
   try{
+    // cuando la página se oculta -> intentar asegurar que el player "oculto" reproduzca antes de detener el visible
     if(document.hidden){
-      if(visiblePlayer && visiblePlayer.getPlayerState && visiblePlayer.getPlayerState() === YT.PlayerState.PLAYING){
-        const cur = visiblePlayer.getCurrentTime ? visiblePlayer.getCurrentTime() : 0;
-        const vid = currentTrack?.videoId;
-        if(vid && hiddenPlayer && hiddenPlayer.loadVideoById){
-          hiddenPlayer.loadVideoById({videoId:vid, startSeconds: cur});
-          hiddenPlayer.playVideo && hiddenPlayer.playVideo();
-          visiblePlayer.stopVideo && visiblePlayer.stopVideo();
+      try{
+        // solo transferir si visiblePlayer está reproduciendo actualmente
+        if(visiblePlayer && typeof visiblePlayer.getPlayerState === 'function' &&
+           visiblePlayer.getPlayerState() === YT.PlayerState.PLAYING && currentTrack && currentTrack.videoId){
+          const cur = (visiblePlayer && visiblePlayer.getCurrentTime) ? visiblePlayer.getCurrentTime() : 0;
+          // carga en hidden
+          hiddenPlayer.loadVideoById({videoId: currentTrack.videoId, startSeconds: cur});
+          // intenta reproducir inmediatamente
+          try{ hiddenPlayer.playVideo && hiddenPlayer.playVideo(); }catch(e){}
+          // espera a que hidden realmente entre en PLAYING
+          const ok = await waitForPlayerState(hiddenPlayer, YT.PlayerState.PLAYING, 3000);
+          if(ok){
+            // detener visible solo si hidden ya está reproduciendo
+            try{ visiblePlayer.stopVideo && visiblePlayer.stopVideo(); }catch(e){}
+          } else {
+            // si no pudo arrancar hidden, dejamos visible reproduciendo para evitar pause audible
+            try{ /* no hacemos stop en visible */ }catch(e){}
+          }
         }
-      }
+      }catch(err){ console.warn('visibility -> hidden transfer error', err); }
     } else {
-      if(hiddenPlayer && hiddenPlayer.getPlayerState && hiddenPlayer.getPlayerState() === YT.PlayerState.PLAYING){
-        const cur = hiddenPlayer.getCurrentTime ? hiddenPlayer.getCurrentTime() : 0;
-        const vid = currentTrack?.videoId;
-        if(vid && visiblePlayer && visiblePlayer.loadVideoById){
-          visiblePlayer.loadVideoById({videoId:vid, startSeconds: cur});
-          visiblePlayer.playVideo && visiblePlayer.playVideo();
-          hiddenPlayer.stopVideo && hiddenPlayer.stopVideo();
+      // cuando la página vuelve visible -> transferir de hidden a visible sin cortar audio
+      try{
+        if(hiddenPlayer && typeof hiddenPlayer.getPlayerState === 'function' &&
+           hiddenPlayer.getPlayerState() === YT.PlayerState.PLAYING && currentTrack && currentTrack.videoId){
+          const cur = (hiddenPlayer && hiddenPlayer.getCurrentTime) ? hiddenPlayer.getCurrentTime() : 0;
+          visiblePlayer.loadVideoById({videoId: currentTrack.videoId, startSeconds: cur});
+          try{ visiblePlayer.playVideo && visiblePlayer.playVideo(); }catch(e){}
+          const ok = await waitForPlayerState(visiblePlayer, YT.PlayerState.PLAYING, 3000);
+          if(ok){
+            try{ hiddenPlayer.stopVideo && hiddenPlayer.stopVideo(); }catch(e){}
+          } else {
+            // si visible no arrancó, mantenemos hidden para no cortar
+          }
         }
-      }
+      }catch(err){ console.warn('visibility -> visible transfer error', err); }
     }
-  }catch(e){ console.warn('visibility transfer error', e); }
+  }finally{
+    // permitir futuros transfers
+    transferInProgress = false;
+  }
 });
+
 
 /* small helper to show mini */
 function showMini(show=true){ if(show) $('#miniPlayer').classList.remove('hidden'); else $('#miniPlayer').classList.add('hidden'); }
